@@ -1,0 +1,22 @@
+# examples/crontab.example
+
+# ==================== SECURITY MONITORING ENTERPRISE ====================
+# Sistema automatizado de auditoría y monitoreo de seguridad
+
+# Auditoría rápida diaria a las 6:00 AM
+0 6 * * *   $HOME/bin/security-manager audit-quick > /dev/null 2>&1
+
+# Auditoría completa los domingos a las 3:00 AM  
+0 3 * * 0   $HOME/bin/security-manager audit-full > /dev/null 2>&1
+
+# Limpieza de colas los lunes a las 2:00 AM
+0 2 * * 1   $HOME/bin/security-queue cleanup > /dev/null 2>&1
+
+# Health check cada hora
+0 * * * *   $HOME/bin/security-manager status > /dev/null 2>&1
+
+# Rotación de keys de vault el primer día de cada mes
+0 2 1 * *   $HOME/bin/security-vault rotate > /dev/null 2>&1
+
+# Backup de base de datos de colas los sábados a las 1:00 AM
+0 1 * * 6   $HOME/bin/security-queue backup > /dev/null 2>&1

@@ -1,0 +1,23 @@
+# Datos de usuario
+/user-data/
+/tmp/
+
+# Logs
+*.log
+*.jsonl
+
+# Vault keys
+*.key
+
+# SQLite databases
+*.db
+*.db-journal
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+*.tmp
+*.temp
+EOF
