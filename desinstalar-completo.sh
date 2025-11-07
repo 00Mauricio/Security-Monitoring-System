@@ -208,4 +208,4 @@ else
 fi
 
 echo ""
-log "INFO" "💡 Para una reinstalación limpia ejecute: ./install-desde-cero.sh"
+log "INFO" "💡 Para una reinstalación limpia ejecute: ./install.sh"

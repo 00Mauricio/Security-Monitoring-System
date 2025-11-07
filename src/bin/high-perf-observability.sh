@@ -1,121 +1,148 @@
 #!/bin/bash
-# high-perf-observability.sh
+# high-perf-observability.sh — Versión robusta con archivo Python
 set -euo pipefail
 
 readonly OBS_SOCKET="/tmp/security-obs.sock"
 readonly OBS_LOG_DIR="$HOME/.local/security/logs"
+readonly PID_FILE="/tmp/security-obs.pid"
+readonly OBS_DAEMON="$HOME/.local/security/bin/security-obs-daemon.py"
+readonly DAEMON_LOG="$OBS_LOG_DIR/obs-daemon.log"
 
-# Daemon de observabilidad
+mkdir -p "$OBS_LOG_DIR"
+
+check_python_deps() {
+    echo "🔍 Verificando dependencias Python..."
+    
+    if ! python3 -c "import asyncio" 2>/dev/null; then
+        echo "❌ asyncio no disponible"
+        return 1
+    fi
+    
+    if ! python3 -c "import psutil" 2>/dev/null; then
+        echo "⚠️  psutil no disponible - usando métricas básicas"
+    fi
+    
+    echo "✅ Dependencias Python verificadas"
+    return 0
+}
+
 start_obs_daemon() {
-    nohup python3 - << 'EOF' > /dev/null 2>&1 &
-import asyncio
-import json
-import logging
-import time
-from datetime import datetime, timezone
-import socket
-import struct
-import os
+    echo "🚀 Iniciando módulo de observabilidad..."
+    
+    # Verificar que el script Python existe
+    if [[ ! -f "$OBS_DAEMON" ]]; then
+        echo "❌ No se encuentra el script Python: $OBS_DAEMON"
+        return 1
+    fi
 
-class SecurityObservability:
-    def __init__(self):
-        self.metrics = {}
-        self.batch = []
-        self.batch_size = 100
-        self.log_file = os.path.expanduser("~/.local/security/logs/observability.jsonl")
-        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
-        
-    async def handle_client(self, reader, writer):
-        try:
-            data = await reader.read(4096)
-            record = json.loads(data.decode())
-            await self.process_record(record)
-        except Exception as e:
-            logging.error(f"Client handling error: {e}")
-        finally:
-            writer.close()
-    
-    async def process_record(self, record):
-        # Timestamp normalizado a UTC-6
-        record['timestamp'] = datetime.now(timezone.utc).astimezone(
-            timezone(offset=-timezone(timedelta(hours=6)))
-        ).isoformat()
-        
-        self.batch.append(record)
-        
-        if len(self.batch) >= self.batch_size:
-            await self.flush_batch()
-    
-    async def flush_batch(self):
-        if not self.batch:
-            return
-            
-        try:
-            with open(self.log_file, 'a', buffering=1) as f:  # Line buffering
-                for record in self.batch:
-                    f.write(json.dumps(record) + '\n')
-            self.batch.clear()
-        except Exception as e:
-            logging.error(f"Batch flush error: {e}")
-    
-    async def start_server(self):
-        server = await asyncio.start_unix_server(
-            self.handle_client, 
-            '/tmp/security-obs.sock'
-        )
-        
-        async with server:
-            await server.serve_forever()
+    # Verificar dependencias
+    check_python_deps
 
-if __name__ == "__main__":
-    obs = SecurityObservability()
-    asyncio.run(obs.start_server())
-EOF
-    echo $! > "/tmp/security-obs.pid"
+    # Limpiar proceso anterior
+    stop_obs
+    
+    # Ejecutar el daemon Python directamente
+    echo "🔍 Ejecutando daemon Python..."
+    python3 "$OBS_DAEMON" &
+    local py_pid=$!
+    echo $py_pid > "$PID_FILE"
+    
+    # Esperar a que se inicialice
+    local timeout=10
+    local count=0
+    
+    while [[ $count -lt $timeout ]]; do
+        if [[ -S "$OBS_SOCKET" ]]; then
+            echo "✅ security-obs iniciado correctamente (PID $py_pid)"
+            echo "📊 Socket activo: $OBS_SOCKET"
+            return 0
+        fi
+        
+        # Verificar si el proceso sigue vivo
+        if ! kill -0 $py_pid 2>/dev/null; then
+            echo "❌ El daemon Python se cerró inesperadamente"
+            if [[ -f "$DAEMON_LOG" ]]; then
+                echo "📄 Revisa los logs: $DAEMON_LOG"
+                tail -5 "$DAEMON_LOG"
+            fi
+            rm -f "$PID_FILE"
+            return 1
+        fi
+        
+        sleep 1
+        ((count++))
+    done
+    
+    echo "⚠️  Timeout - el socket no se creó en $timeout segundos"
+    if [[ -f "$DAEMON_LOG" ]]; then
+        echo "📄 Últimos logs:"
+        tail -5 "$DAEMON_LOG"
+    fi
+    return 1
 }
 
-log_structured_perf() {
-    local level="$1"
-    local message="$2"
-    local fields="${3:-{}}"
+start_basic_obs() {
+    echo "🔄 Iniciando modo básico (sin Python)..."
+    stop_obs
     
-    # Serialización manual sin jq - 10x más rápido
-    local timestamp=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).astimezone(timezone(offset=-timezone(timedelta(hours=6)))).isoformat())" 2>/dev/null || date -Iseconds)
+    nohup bash -c "
+        echo '🟢 Iniciando observabilidad básica - \$(date)' > '$DAEMON_LOG'
+        while true; do
+            timestamp=\$(date -Iseconds)
+            cpu=\$(top -bn1 | grep 'Cpu(s)' | awk '{print \$2 + \$4}')
+            mem=\$(free -m | awk '/Mem:/ {print \$3}')
+            echo \"[\$timestamp] CPU: \${cpu}% MEM: \${mem}MB\" >> '$OBS_LOG_DIR/obs.log'
+            sleep 5
+        done
+    " >/dev/null 2>&1 &
     
-    local json_payload=$(printf '{"timestamp":"%s","level":"%s","message":"%s","host":"%s","fields":%s}' \
-        "$timestamp" "$level" "$(echo "$message" | sed 's/"/\\"/g')" "$(hostname)" "$fields")
-    
-    # Enviar via socket sin bloqueo
-    echo "$json_payload" | socat - UNIX-CONNECT:"$OBS_SOCKET" 2>/dev/null || true
+    echo \$! > "$PID_FILE"
+    echo "✅ Observabilidad básica iniciada (PID \$(cat "$PID_FILE"))"
 }
 
-increment_counter_perf() {
-    local metric_name="$1"
-    local value="${2:-1}"
-    local labels="${3:-{}}"
-    
-    local timestamp=$(python3 -c "from datetime import datetime, timezone; print(datetime.now(timezone.utc).astimezone(timezone(offset=-timezone(timedelta(hours=6)))).isoformat())" 2>/dev/null || date -Iseconds)
-    
-    local metric_payload=$(printf '{"type":"counter","name":"%s","value":%d,"labels":%s,"timestamp":"%s"}' \
-        "$metric_name" "$value" "$labels" "$timestamp")
-    
-    echo "$metric_payload" | socat - UNIX-CONNECT:"$OBS_SOCKET" 2>/dev/null || true
+stop_obs() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid=\$(cat "$PID_FILE")
+        if ps -p "$pid" >/dev/null 2>&1; then
+            kill "$pid" 2>/dev/null && echo "🛑 security-obs detenido (PID $pid)"
+            sleep 2
+        fi
+        rm -f "$PID_FILE"
+    fi
+    rm -f "$OBS_SOCKET"
+    echo "🧹 Recursos limpiados"
 }
 
-# Health endpoint simple
-start_health_endpoint() {
-    nohup python3 -m http.server 8080 --directory ~/.local/security/metrics > /dev/null 2>&1 &
-    
-    # Exportar métricas en formato Prometheus
-    cat > ~/.local/security/metrics/index.html << 'EOF'
-# HELP security_audits_total Total security audits performed
-# TYPE security_audits_total counter
-security_audits_total{status="success"} 0
-security_audits_total{status="failure"} 0
-
-# HELP security_alerts_total Total security alerts generated  
-# TYPE security_alerts_total counter
-security_alerts_total{severity="critical"} 0
-security_alerts_total{severity="warning"} 0
-EOF
+status_obs() {
+    if [[ -S "$OBS_SOCKET" ]]; then
+        echo "✅ security-obs activo (socket operativo)"
+        return 0
+    elif [[ -f "$PID_FILE" ]] && ps -p "\$(cat "$PID_FILE")" >/dev/null 2>&1; then
+        echo "⚠️  security-obs activo pero sin socket"
+        return 0
+    else
+        echo "❌ security-obs inactivo"
+        return 1
+    fi
 }
+
+case "\${1:-}" in
+    start) 
+        if start_obs_daemon; then
+            echo "🎉 Observabilidad iniciada correctamente"
+        else
+            echo "❌ Falló el inicio de observabilidad - intentando modo básico"
+            start_basic_obs
+        fi
+        ;;
+    stop)  stop_obs ;;
+    status) status_obs ;;
+    *) 
+        echo "Uso: security-obs {start|stop|status}"
+        echo ""
+        echo "🔍 Diagnóstico:"
+        echo "  Ver logs: tail -f $DAEMON_LOG"
+        echo "  Ver socket: ls -la $OBS_SOCKET"
+        echo "  Ver proceso: ps -p \$(cat $PID_FILE 2>/dev/null) 2>/dev/null"
+        ;;
+esac

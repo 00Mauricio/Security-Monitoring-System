@@ -3,11 +3,6 @@ set -euo pipefail
 
 echo "🚀 INSTALACIÓN DESDE CERO DEL SISTEMA DE SEGURIDAD"
 echo "=================================================="
-#!/bin/bash
-set -euo pipefail
-
-echo "🚀 INSTALACIÓN DESDE CERO DEL SISTEMA DE SEGURIDAD"
-echo "=================================================="
 
 # VERIFICACIÓN DE INSTALACIONES PREVIAS
 echo "🔍 Buscando instalaciones previas..."
@@ -206,35 +201,70 @@ cat > "$INSTALL_DIR/bin/high-perf-observability.sh" << 'EOF'
 # High Performance Observability Agent
 set -euo pipefail
 
-LOG_FILE="$HOME/.local/security/logs/obs.log"
-PID_FILE="/tmp/security-obs.pid"
+readonly OBS_SOCKET="/tmp/security-obs.sock"
+readonly OBS_LOG_DIR="$HOME/.local/security/logs"
+readonly PID_FILE="/tmp/security-obs.pid"
+readonly OBS_DAEMON="$HOME/.local/security/bin/security-obs-daemon.py"
+readonly DAEMON_LOG="$OBS_LOG_DIR/obs-daemon.log"
+
+mkdir -p "$OBS_LOG_DIR"
 
 start_obs() {
     echo "🚀 Iniciando módulo de observabilidad..."
-    # Inicia un proceso persistente real
-    nohup bash -c "
-        mkdir -p \"$(dirname "$LOG_FILE")\"
-        echo \"📡 Observabilidad activa: registrando métricas cada 5s\" >> \"$LOG_FILE\"
-        while true; do
-            timestamp=\$(date -Iseconds)
-            cpu=\$(top -bn1 | grep 'Cpu(s)' | awk '{print \$2 + \$4}')
-            mem=\$(free -m | awk '/Mem:/ {print \$3}')
-            echo \"[\$timestamp] CPU: \${cpu}% MEM: \${mem}MB\" >> \"$LOG_FILE\"
-            sleep 5
-        done
-    " >/dev/null 2>&1 &
-    echo $! > "$PID_FILE"
-    echo "✅ security-obs iniciado (PID $(cat "$PID_FILE"))"
+    
+    # Verificar que el script Python existe
+    if [[ ! -f "$OBS_DAEMON" ]]; then
+        echo "❌ No se encuentra el script Python: $OBS_DAEMON"
+        return 1
+    fi
+
+    # Limpiar proceso anterior
+    stop_obs
+    
+    # Ejecutar el daemon Python
+    python3 "$OBS_DAEMON" &
+    local py_pid=$!
+    echo $py_pid > "$PID_FILE"
+    
+    # Esperar a que se inicialice
+    local timeout=10
+    local count=0
+    
+    while [[ $count -lt $timeout ]]; do
+        if [[ -S "$OBS_SOCKET" ]]; then
+            echo "✅ security-obs iniciado (PID $py_pid)"
+            return 0
+        fi
+        
+        if ! kill -0 $py_pid 2>/dev/null; then
+            echo "❌ El daemon Python se cerró"
+            if [[ -f "$DAEMON_LOG" ]]; then
+                echo "📄 Revisa: $DAEMON_LOG"
+            fi
+            rm -f "$PID_FILE"
+            return 1
+        fi
+        
+        sleep 1
+        ((count++))
+    done
+    
+    echo "⚠️  Timeout - iniciando sin socket"
+    return 0
 }
 
 stop_obs() {
     if [[ -f "$PID_FILE" ]]; then
-        kill "$(cat "$PID_FILE")" 2>/dev/null || true
+        local pid=$(cat "$PID_FILE")
+        if ps -p "$pid" >/dev/null 2>&1; then
+            kill "$pid" 2>/dev/null || true
+            echo "🛑 security-obs detenido"
+        fi
         rm -f "$PID_FILE"
-        echo "🛑 security-obs detenido"
     else
         echo "⚠️  security-obs no estaba en ejecución"
     fi
+    rm -f "$OBS_SOCKET"
 }
 
 status_obs() {
@@ -253,6 +283,125 @@ case "${1:-}" in
 esac
 EOF
 
+# --- OBSERVABILITY PYTHON SCRIPT ---
+cat > "$INSTALL_DIR/bin/security-obs-daemon.py" << 'PYTHON_EOF'
+#!/usr/bin/env python3
+import asyncio
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+OBS_SOCKET = "/tmp/security-obs.sock"
+OBS_LOG_FILE = os.path.expanduser("~/.local/security/logs/observability.jsonl")
+DAEMON_LOG = os.path.expanduser("~/.local/security/logs/obs-daemon.log")
+
+def log_daemon(msg):
+    try:
+        os.makedirs(os.path.dirname(DAEMON_LOG), exist_ok=True)
+        with open(DAEMON_LOG, "a") as f:
+            f.write(f"{datetime.now().isoformat()} - {msg}\n")
+    except:
+        pass
+
+class SecurityObservability:
+    def __init__(self):
+        self.batch = []
+        os.makedirs(os.path.dirname(OBS_LOG_FILE), exist_ok=True)
+        log_daemon("🟢 Iniciando daemon de observabilidad")
+
+    async def handle_client(self, reader, writer):
+        try:
+            data = await reader.read(4096)
+            if data:
+                record = json.loads(data.decode())
+                record["timestamp"] = datetime.now(timezone.utc).isoformat()
+                self.batch.append(record)
+                if len(self.batch) >= 10:
+                    await self.flush()
+        except Exception as e:
+            log_daemon(f"❌ Error en cliente: {e}")
+        finally:
+            writer.close()
+
+    async def flush(self):
+        try:
+            if self.batch:
+                with open(OBS_LOG_FILE, "a") as f:
+                    for record in self.batch:
+                        f.write(json.dumps(record) + "\n")
+                self.batch.clear()
+        except Exception as e:
+            log_daemon(f"❌ Error en flush: {e}")
+
+    async def metric_loop(self):
+        while True:
+            try:
+                metric = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "system_metrics"
+                }
+                
+                if PSUTIL_AVAILABLE:
+                    metric["cpu_percent"] = psutil.cpu_percent(interval=1)
+                    metric["memory_mb"] = psutil.virtual_memory().used // (1024 * 1024)
+                    metric["memory_percent"] = psutil.virtual_memory().percent
+                else:
+                    with open('/proc/loadavg', 'r') as f:
+                        metric["loadavg"] = f.read().strip()
+                
+                self.batch.append(metric)
+                await self.flush()
+                
+            except Exception as e:
+                log_daemon(f"❌ Error en metric_loop: {e}")
+            
+            await asyncio.sleep(5)
+
+    async def start_server(self):
+        try:
+            if os.path.exists(OBS_SOCKET):
+                os.unlink(OBS_SOCKET)
+            
+            server = await asyncio.start_unix_server(
+                self.handle_client,
+                OBS_SOCKET
+            )
+            
+            log_daemon(f"✅ Socket creado en {OBS_SOCKET}")
+            
+            asyncio.create_task(self.metric_loop())
+            
+            async with server:
+                await server.serve_forever()
+                
+        except Exception as e:
+            log_daemon(f"❌ Error crítico en servidor: {e}")
+            raise
+
+def main():
+    try:
+        log_daemon("🚀 Iniciando Security Observability Daemon")
+        obs = SecurityObservability()
+        asyncio.run(obs.start_server())
+    except KeyboardInterrupt:
+        log_daemon("⏹️  Daemon detenido por usuario")
+    except Exception as e:
+        log_daemon(f"💥 Error fatal: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+PYTHON_EOF
+
+touch ~/.local/security/vault/secrets.vault
+sqlite3 ~/.local/security/queue/security_queue.db "CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, content TEXT, timestamp TEXT);"
 
 # === PERMISOS ===
 chmod +x "$INSTALL_DIR/bin"/*.sh
@@ -282,4 +431,3 @@ echo "  security-manager status"
 echo "  security-vault list"
 echo "  security-queue status"
 echo "  security-obs start"
-EOF

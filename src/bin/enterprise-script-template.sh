@@ -88,7 +88,8 @@ show_system_status() {
     
     echo "📦 Vault: $( [[ -f ~/.local/security/vault/secrets.vault ]] && echo "✅" || echo "❌" )"
     echo "📬 Cola: $( [[ -f ~/.local/security/queue/security_queue.db ]] && echo "✅" || echo "❌" )"
-    echo "📊 Observabilidad: $( pgrep -f "security-obs" >/dev/null && echo "✅" || echo "❌" )"
+    echo "📊 Observabilidad: $( pgrep -f 'high-perf-observability.sh' >/dev/null && echo '✅' || echo '❌' )"
+
     echo "🔗 Comandos: ✅ Disponibles"
     
     log_structured_perf "INFO" "Estado del sistema verificado" "{\"component\": \"status_check\"}"
