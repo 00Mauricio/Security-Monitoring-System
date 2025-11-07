@@ -1,10 +1,4 @@
-Perfecto 👍 — tu README.md ya tiene una buena base técnica, pero lo vamos a **mejorar para hacerlo entendible incluso para usuarios nuevos** y a la vez **mantenerlo profesional y personalizable**, de modo que cualquiera pueda adaptarlo a sus propios webhooks, tokens o servicios de monitoreo.
 
-Acá te dejo una **versión mejorada** y completa del README que podés usar directamente ⬇️
-
----
-
-````markdown
 # 🔐 Enterprise Security Monitoring System
 
 Sistema modular y automatizado de **monitoreo y auditoría de seguridad** diseñado para entornos profesionales, pero suficientemente simple para adaptarse a proyectos personales o servidores autogestionados.
